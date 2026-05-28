@@ -1,11 +1,11 @@
 'use client'
 
-import { useCallback, useRef, useState } from 'react'
-import { MAX_RECORD_SECONDS, decodeFile, recordFromMic, TARGET_SAMPLE_RATE } from './lib/audio'
-import { identify, type Prediction } from './lib/inference'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { MAX_RECORD_SECONDS, fromFile, recordFromMic, type Capture } from './lib/audio'
+import { ensureWorkers, identify, type LoadStatus, type Prediction } from './lib/inference'
 import { getGeolocation } from './lib/geolocate'
 
-type Phase = 'idle' | 'recording' | 'thinking' | 'result' | 'error'
+type Phase = 'idle' | 'loading-models' | 'recording' | 'thinking' | 'result' | 'error'
 
 type Narration = {
   paragraph: string
@@ -18,14 +18,21 @@ export default function Home() {
   const [preds, setPreds] = useState<Prediction[]>([])
   const [narration, setNarration] = useState<Narration | null>(null)
   const [errMsg, setErrMsg] = useState('')
+  const [modelStatus, setModelStatus] = useState<LoadStatus>({})
   const fileRef = useRef<HTMLInputElement>(null)
 
-  const runPipeline = useCallback(async (audio: Float32Array) => {
+  // Kick off the (large) model downloads lazily on first user interaction
+  // rather than on page load, so the landing screen stays snappy.
+  const ensureModelsReady = useCallback(async () => {
+    if (phase !== 'idle' && phase !== 'error') return
+    setPhase('loading-models')
+    await ensureWorkers(setModelStatus)
+  }, [phase])
+
+  const runPipeline = useCallback(async (capture: Capture) => {
     setPhase('thinking')
-    const [predictions, geo] = await Promise.all([
-      identify(audio, TARGET_SAMPLE_RATE),
-      getGeolocation(),
-    ])
+    const geo = await getGeolocation()
+    const predictions = await identify(capture, geo, setModelStatus)
     setPreds(predictions)
 
     const res = await fetch('/api/narrate', {
@@ -43,8 +50,8 @@ export default function Home() {
   }, [])
 
   const onPrimaryButton = useCallback(async () => {
-    if (phase === 'recording') return
-    if (phase === 'result' || phase === 'error') {
+    if (phase === 'recording' || phase === 'thinking' || phase === 'loading-models') return
+    if (phase === 'result') {
       setPhase('idle')
       setNarration(null)
       setPreds([])
@@ -52,26 +59,28 @@ export default function Home() {
     }
     try {
       setErrMsg('')
+      await ensureModelsReady()
       setPhase('recording')
-      const audio = await recordFromMic(MAX_RECORD_SECONDS, setRemaining)
-      await runPipeline(audio)
+      const capture = await recordFromMic(MAX_RECORD_SECONDS, setRemaining)
+      await runPipeline(capture)
     } catch (e) {
       setErrMsg(e instanceof Error ? e.message : 'Erreur inconnue')
       setPhase('error')
     }
-  }, [phase, runPipeline])
+  }, [phase, runPipeline, ensureModelsReady])
 
   const onFile = useCallback(async (file: File) => {
     try {
       setErrMsg('')
+      await ensureModelsReady()
       setPhase('thinking')
-      const audio = await decodeFile(file)
-      await runPipeline(audio)
+      const capture = await fromFile(file)
+      await runPipeline(capture)
     } catch (e) {
       setErrMsg(e instanceof Error ? e.message : 'Fichier audio illisible')
       setPhase('error')
     }
-  }, [runPipeline])
+  }, [runPipeline, ensureModelsReady])
 
   return (
     <main className="min-h-screen flex flex-col items-center justify-between px-6 py-10">
@@ -95,6 +104,8 @@ export default function Home() {
             <span className="text-moss-600 italic">Laisse la forêt parler.</span>
           </h1>
         )}
+
+        {phase === 'loading-models' && <LoadingModels status={modelStatus} />}
 
         {phase === 'recording' && (
           <h1 className="text-2xl text-moss-800 mb-10" style={{ fontFamily: 'var(--font-serif)' }}>
@@ -129,8 +140,10 @@ export default function Home() {
                 <summary className="cursor-pointer">détails techniques</summary>
                 <ul className="mt-2 space-y-1">
                   {preds.map((p) => (
-                    <li key={p.label}>
-                      {p.label} — {(p.score * 100).toFixed(0)}% <span className="opacity-50">({p.source})</span>
+                    <li key={p.label + p.source}>
+                      {p.label}
+                      {p.scientific && <span className="opacity-50 italic"> · {p.scientific}</span>}
+                      {' '}— {(p.score * 100).toFixed(0)}% <span className="opacity-50">({p.source})</span>
                     </li>
                   ))}
                 </ul>
@@ -147,7 +160,7 @@ export default function Home() {
           <PrimaryButton phase={phase} remaining={remaining} onClick={onPrimaryButton} />
         )}
 
-        {(phase === 'result' || phase === 'error') && (
+        {phase === 'result' && (
           <button
             onClick={() => setPhase('idle')}
             className="mt-6 text-moss-700 underline underline-offset-4 decoration-moss-300"
@@ -229,6 +242,27 @@ function PrimaryButton({
           </>
         )}
       </button>
+    </div>
+  )
+}
+
+function LoadingModels({ status }: { status: LoadStatus }) {
+  // Combined progress weighted equally between the two models. Cached after
+  // first load, so this screen is only seen once per device.
+  const b = status.birdnet?.progress ?? 0
+  const y = status.yamnet?.progress ?? 0
+  const combined = Math.round((b + y) / 2)
+  return (
+    <div className="w-full max-w-xs flex flex-col items-center mb-10">
+      <p className="text-moss-800 mb-4" style={{ fontFamily: 'var(--font-serif)' }}>
+        Je télécharge les naturalistes… <span className="opacity-60">({combined}%)</span>
+      </p>
+      <div className="w-full h-1 bg-moss-100 rounded-full overflow-hidden">
+        <div className="h-full bg-moss-500 transition-all" style={{ width: `${combined}%` }} />
+      </div>
+      <p className="text-xs text-stone/70 mt-4 leading-relaxed text-center">
+        Première visite seulement. Ensuite tout est instantané et hors-ligne.
+      </p>
     </div>
   )
 }

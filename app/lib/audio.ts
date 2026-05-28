@@ -1,11 +1,15 @@
-// Audio capture + decode utilities.
-// All processing is client-side. The PCM Float32Array returned by these
-// helpers feeds directly into the TF.js inference pipeline.
+// Audio capture + decode. All client-side. Returns the original Blob so
+// callers can decode it at the multiple sample rates required by the two
+// models (22050 for BirdNET, 16000 for YAMNet).
 
-export const TARGET_SAMPLE_RATE = 48_000
 export const MAX_RECORD_SECONDS = 60
 
-export async function recordFromMic(seconds: number, onTick?: (s: number) => void): Promise<Float32Array> {
+export type Capture = {
+  blob: Blob
+  durationSec: number
+}
+
+export async function recordFromMic(seconds: number, onTick?: (s: number) => void): Promise<Capture> {
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('Micro non disponible sur cet appareil')
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
@@ -23,7 +27,7 @@ export async function recordFromMic(seconds: number, onTick?: (s: number) => voi
   const tick = setInterval(() => {
     remaining -= 1
     onTick?.(remaining)
-    if (remaining <= 0) rec.state === 'recording' && rec.stop()
+    if (remaining <= 0 && rec.state === 'recording') rec.stop()
   }, 1000)
 
   await stopped
@@ -31,20 +35,24 @@ export async function recordFromMic(seconds: number, onTick?: (s: number) => voi
   stream.getTracks().forEach((t) => t.stop())
 
   const blob = new Blob(chunks, { type: mime })
-  return decodeToMono(await blob.arrayBuffer())
+  return { blob, durationSec: Math.min(seconds, MAX_RECORD_SECONDS) - remaining }
 }
 
-export async function decodeFile(file: File): Promise<Float32Array> {
-  return decodeToMono(await file.arrayBuffer())
+export async function fromFile(file: File): Promise<Capture> {
+  // We don't know duration yet; decode once at 16k just to measure.
+  const pcm = await decodeAt(file, 16000)
+  return { blob: file, durationSec: pcm.length / 16000 }
 }
 
-async function decodeToMono(buf: ArrayBuffer): Promise<Float32Array> {
-  // OfflineAudioContext resamples to TARGET_SAMPLE_RATE in one pass.
-  const tmp = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)()
+export async function decodeAt(source: Blob | File, sampleRate: number): Promise<Float32Array> {
+  const buf = await source.arrayBuffer()
+  // First decode at native rate (we don't pre-know it), then resample with OfflineAudioContext.
+  const Ctor = (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)
+  const tmp = new Ctor()
   const decoded = await tmp.decodeAudioData(buf.slice(0))
   tmp.close()
 
-  const offline = new OfflineAudioContext(1, Math.ceil(decoded.duration * TARGET_SAMPLE_RATE), TARGET_SAMPLE_RATE)
+  const offline = new OfflineAudioContext(1, Math.ceil(decoded.duration * sampleRate), sampleRate)
   const src = offline.createBufferSource()
   src.buffer = decoded
   src.connect(offline.destination)

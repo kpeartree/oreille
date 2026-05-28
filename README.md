@@ -29,14 +29,14 @@ npm run dev
 3. Settings → Environment Variables → `ANTHROPIC_API_KEY`.
 4. Deploy. Chaque push donne une preview URL.
 
-## Modèles à déposer dans `public/models/`
+## Modèles d'inférence (bundlés)
 
-L'inférence est 100 % côté client. Pour activer la vraie reconnaissance :
+L'inférence est 100 % côté client via TensorFlow.js dans deux Web Workers (`public/workers/`).
 
-- `public/models/birdnet/` — modèle TFJS depuis [georg95/birdnet-web](https://github.com/georg95/birdnet-web) (`models/birdnet_v2/`)
-- `public/models/yamnet/`  — conversion TFJS de [YAMNet](https://www.kaggle.com/models/google/yamnet) (Google AudioSet, ~521 classes incluant grillons, cigales, abeilles, grenouilles, vent, ruisseau, etc.)
+- `public/models/birdnet/` (~43 MB) — BirdNET v2, modèle TFJS adapté de [georg95/birdnet-web](https://github.com/georg95/birdnet-web). 6521 espèces d'oiseaux, fenêtres de 3s à 22050 Hz, kernels STFT WebGL custom. Filtrage régional optionnel via le sous-modèle `area-model/` (entrée [lat, lon, semaine de l'année]).
+- `public/models/yamnet/` (~14 MB) — YAMNet (Google AudioSet), 521 classes dont insectes (grillons, cigales, abeilles, mouches), amphibiens, vent, ruisseau, pluie. Fenêtres de 0.96s à 16000 Hz. Converti localement depuis TF Hub via `scripts/convert-yamnet.py` (voir ce fichier).
 
-Tant que ces dossiers ne sont pas présents, `app/lib/inference.ts` retourne une prédiction stub déterministe et le reste du pipeline (narration, UI, géoloc) reste fonctionnel.
+Premier chargement : ~57 MB de téléchargement, ensuite cache navigateur permanent (header `Cache-Control: immutable` sur `/models/*` via `next.config.mjs`).
 
 ## Licences à valider avant tout usage commercial
 
